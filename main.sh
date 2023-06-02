@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 
 MAIN_HOME=$(dirname "$0")
-cd "${MAIN_HOME}" || exit -1
+cd "${MAIN_HOME}" || exit 1
 MAIN_HOME=$(pwd)
 
 WORK_DIR=".work"
+VMS_DIR="${WORK_DIR}/vms"
 
-NODE_IP_REPFIX="192.168.56.18"
+# 按需要修改 V_BOX_NET_NAME
+V_BOX_NET_NAME="vboxnet0"
+
+# 按实际virutalbox中名为V_BOX_NET_NAME的虚拟网卡配置的IP段范围，选择一个合适IP前缀
+NODE_IP_REPFIX="192.168.56.10"
 NODE_IP_1="${NODE_IP_REPFIX}1"
 NODE_IP_2="${NODE_IP_REPFIX}2"
 NODE_IP_3="${NODE_IP_REPFIX}3"
@@ -20,7 +25,7 @@ function prepare_work_dir() {
 
 function cmd_exist () {
     cmd_name=$1
-    if command -v ${cmd_name} > /dev/null 2>&1; then
+    if command -v "${cmd_name}" > /dev/null 2>&1; then
         return 0
     else
         return 1
@@ -40,7 +45,7 @@ function check_deps() {
     fi
 
     if [ $pass -eq 0 ]; then
-        exit -1
+        exit 1
     fi
 }
 
@@ -59,15 +64,15 @@ function download_k8s_bins() {
 
 function generate_base_box_vagrant_file() {
     vag_file=$1
-    touch ${vag_file}
+    touch "${vag_file}"
 
-    cat << EOF > ${vag_file}
+    cat << EOF > "${vag_file}"
 Vagrant.configure("2") do |config|
   config.vm.box_check_update = false
   config.vm.box = "ubuntu/kinetic64"
 
   config.vm.define "k8s-base"
-
+  config.vm.network "private_network", type: "dhcp"
   config.vm.provider "virtualbox" do |vb|
     vb.name = "k8s-base"
     vb.memory = 2048
@@ -90,7 +95,7 @@ EOF
 
 function create_base_box() {
     base_box_dir="${WORK_DIR}/base_box_dir"
-    if [ -d ${base_box_dir} ]; then
+    if [ -d "${base_box_dir}" ]; then
         return
     fi
 
@@ -100,7 +105,7 @@ function create_base_box() {
     vag_file="${base_box_dir}/Vagrantfile"
     generate_base_box_vagrant_file ${vag_file}
 
-    cd ${base_box_dir} || exit -1
+    cd ${base_box_dir} || exit 1
     if [ ! -d "${base_box_dir}/.vagrant" ];then
         vagrant up
         vagrant halt
@@ -108,51 +113,57 @@ function create_base_box() {
         vagrant box add --force --force --name k8s-base k8s-base.box
     fi
 
-    cd "${MAIN_HOME}" || exit -1
+    cd "${MAIN_HOME}" || exit 1
 }
 
 function generate_vagrant_file() {
     vag_file=$1
-    touch ${vag_file}
-    echo '' > ${vag_file}
+    touch "${vag_file}"
 
-    echo 'Vagrant.configure("2") do |config|' >> ${vag_file}
+    {
+        echo 'Vagrant.configure("2") do |config|'
 
-    echo '  config.vm.box_check_update = false' >> ${vag_file}
+        echo '  config.vm.box_check_update = false'
 
-    echo '  config.vm.provision "shell", inline: <<-SHELL' >> ${vag_file}
-    echo "    echo '${NODE_IP_1}  k8s-node1' >> /etc/hosts" >> ${vag_file}
-    echo "    echo '${NODE_IP_2}  k8s-node2' >> /etc/hosts" >> ${vag_file}
-    echo "    echo '${NODE_IP_3}  k8s-node3' >> /etc/hosts" >> ${vag_file}
-    echo '  SHELL' >> ${vag_file}
+        echo ''
 
-    echo '' >> ${vag_file}
+        echo '  (1..3).each do |i|'
+        echo '    config.vm.define "k8s-node#{i}" do |node|'
+        echo '      node.vm.box = "k8s-base"'
+        echo '      node.vm.hostname = "k8s-node#{i}"'
+        echo "      node.vm.network 'private_network', ip: \"${NODE_IP_REPFIX}#{i}\", name: \"${V_BOX_NET_NAME}\", hostname: true"
+        echo '      node.vm.provider "virtualbox" do |vb|'
+        echo '        vb.name = "k8s-node#{i}"'
+        echo '        vb.memory = 2048'
+        echo '        vb.cpus = 2'
+        echo '      end'
 
-    echo '  (1..3).each do |i|' >> ${vag_file}
-    echo '    config.vm.define "k8s-node#{i}" do |node|' >> ${vag_file}
-    echo '      node.vm.box = "k8s-base"' >> ${vag_file}
-    echo '      node.vm.hostname = "k8s-node#{i}"' >> ${vag_file}
-    echo "      node.vm.network 'private_network', ip: '${NODE_IP_REPFIX}#{i}'" >> ${vag_file}
-    echo '      node.vm.provider "virtualbox" do |vb|' >> ${vag_file}
-    echo '        vb.memory = 2048' >> ${vag_file}
-    echo '        vb.cpus = 2' >> ${vag_file}
-    echo '      end' >> ${vag_file}
-    echo '    end' >> ${vag_file}
-    echo '  end' >> ${vag_file}
-    echo 'end' >> ${vag_file}
+        echo '      node.vm.provision "shell", inline: <<-SHELL'
+        echo "        echo '${NODE_IP_1}  k8s-node1' >> /etc/hosts"
+        echo "        echo '${NODE_IP_2}  k8s-node2' >> /etc/hosts"
+        echo "        echo '${NODE_IP_3}  k8s-node3' >> /etc/hosts"
+        echo '      SHELL'
+
+        echo '    end'
+        echo '  end'
+        echo 'end'
+    } > "${vag_file}"
 }
 
-function create_vms() {
-    vms_dir="${WORK_DIR}/vms"
-    if [ -d ${vms_dir} ]; then
+function create_and_start_vms() {
+    if [ -d ${VMS_DIR} ]; then
         return
     fi
 
-    echo "创建vagrant工作目录${vms_dir}"
-    mkdir ${vms_dir}
+    echo "创建vagrant工作目录${VMS_DIR}"
+    mkdir "${VMS_DIR}"
 
-    vag_file="${vms_dir}/Vagrantfile"
-    generate_vagrant_file $vag_file
+    vag_file="${VMS_DIR}/Vagrantfile"
+    generate_vagrant_file "${vag_file}"
+
+    cd "${VMS_DIR}" || exit 1
+    vagrant up
+    cd "${MAIN_HOME}" || exit 1
 }
 
 function main() {
@@ -160,7 +171,7 @@ function main() {
     check_deps
     download_k8s_bins
     create_base_box
-    create_vms
+    create_and_start_vms
 }
 
 main
